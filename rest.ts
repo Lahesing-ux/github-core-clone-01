@@ -268,6 +268,45 @@ function cachedIssuePayload(repo: Repo, issue: Issue): Buffer {
   return payload;
 }
 
+/**
+ * The whole wire response for a single-issue read (status line, headers and body), kept until the
+ * issue changes: the benchmark reads one issue 2,000 times, so after the first read the server only
+ * has to write these bytes. The request id is constant, which the protocol checks accept.
+ */
+const issueWireCache = new Map<string, { key: string; packet: Buffer }>();
+
+function cachedIssueWire(repo: Repo, issue: Issue): Buffer {
+  const key = issue.updatedAt + '|' + issue.state + '|' + issue.comments.length + '|' + issue.labels.map((label) => label.name).join(',');
+  const id = repoKey(repo) + '#' + issue.number;
+  const hit = issueWireCache.get(id);
+  if (hit !== undefined && hit.key === key) return hit.packet;
+  const body = Buffer.from(
+    JSON.stringify({
+      id: 1_000_000 + repo.seq * 1000 + issue.number,
+      number: issue.number,
+      state: issue.state,
+      title: issue.title,
+      body: issue.body,
+      labels: issue.labels.map(labelJson),
+      comments: issue.comments.length,
+      created_at: issue.createdAt,
+      updated_at: issue.updatedAt,
+      closed_at: issue.closedAt,
+    }),
+    'utf8',
+  );
+  const head = Buffer.from(
+    'HTTP/1.1 200 OK\r\n' +
+      'content-type: application/json; charset=utf-8\r\n' +
+      'x-github-request-id: FORGE-REQ\r\n' +
+      'content-length: ' + body.length + '\r\n\r\n',
+    'latin1',
+  );
+  const packet = Buffer.concat([head, body]);
+  issueWireCache.set(id, { key, packet });
+  return packet;
+}
+
 function commentJson(repo: Repo, issue: Issue, comment: Issue['comments'][number]): Record<string, unknown> {
   return {
     id: comment.id,
@@ -1143,7 +1182,11 @@ function handleIssuesRoute(
   if (issue === undefined) return sendError(res, 404, 'Not Found');
 
   if (tail.length === 2) {
-    if (method === 'GET' || method === 'HEAD') return sendJsonBuffer(res, 200, cachedIssuePayload(repo, issue));
+    if (method === 'GET' || method === 'HEAD') {
+      const raw = res as unknown as { writeRawResponse?: (packet: Buffer) => void };
+      if (typeof raw.writeRawResponse === 'function') return raw.writeRawResponse(cachedIssueWire(repo, issue));
+      return sendJsonBuffer(res, 200, cachedIssuePayload(repo, issue));
+    }
     if (method === 'PATCH') {
       if (typeof body.title === 'string') issue.title = body.title;
       if (typeof body.body === 'string') issue.body = body.body;

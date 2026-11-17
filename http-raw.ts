@@ -190,6 +190,28 @@ class RawResponse implements RawResponseLike {
     return this;
   }
 
+  /**
+   * Write a complete response packet the handler has already serialised (status line, headers and
+   * body in one Buffer). The hot read path uses this to skip header assembly entirely; the buffered
+   * protocol headers and the content-length are already in the bytes, so none are added here.
+   */
+  writeRawResponse(packet: Buffer): void {
+    if (this.writableEnded) return;
+    this.writableEnded = true;
+    this.headersSent = true;
+    this._chunks.length = 0;
+    const socket = this.socket;
+    if (!socket.destroyed) {
+      try {
+        socket.write(packet);
+        if (!this._keepAlive) socket.end();
+      } catch {
+        socket.destroy();
+      }
+    }
+    this._complete();
+  }
+
   destroy(): void {
     if (!this.writableEnded) {
       this.writableEnded = true;
