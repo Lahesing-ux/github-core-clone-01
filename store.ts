@@ -295,6 +295,12 @@ export function listRepos(): Repo[] {
 
 // ---------------------------------------------------------------- object access
 
+/** Store an object whose id is already known (a received pack computed it), skipping the re-hash. */
+export function putObjectAt(repo: Repo, oid: string, type: GitObjectType, data: Buffer): string {
+  if (!repo.objects.has(oid)) repo.objects.set(oid, { type, data });
+  return oid;
+}
+
 export function putObject(repo: Repo, type: GitObjectType, data: Buffer): string {
   const oid = hashObject(type, data);
   const existing = repo.objects.get(oid);

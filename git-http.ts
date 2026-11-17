@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto';
 import { deflateSync, inflateSync } from 'node:zlib';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { buildCommit, buildTree, getRepo, parseTree, putObject, type Repo } from './store.ts';
+import { buildCommit, buildTree, getRepo, parseTree, putObject, putObjectAt, type Repo } from './store.ts';
 
 const ZERO_OID = '0'.repeat(40);
 const AGENT = 'makefun-forge/1.0';
@@ -576,7 +576,7 @@ function handleReceivePack(repo: Repo, body: Buffer): Buffer {
   if (rest.length > 0) {
     try {
       const objects = readPackObjects(rest, (oid) => objectOf(repo, oid));
-      for (const object of objects) putObject(repo, object.type, object.data);
+      for (const object of objects) putObjectAt(repo, object.oid, object.type, object.data);
     } catch (err) {
       unpackOk = false;
       unpackDetail = err instanceof Error ? err.message : String(err);
