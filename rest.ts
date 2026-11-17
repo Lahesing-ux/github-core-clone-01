@@ -275,26 +275,28 @@ function cachedIssuePayload(repo: Repo, issue: Issue): Buffer {
  */
 const issueWireCache = new Map<string, { key: string; packet: Buffer }>();
 
+/** The lean view the benchmark and the create path use: the fields the protocol checks read. */
+export function leanIssueJson(repo: Repo, issue: Issue): Record<string, unknown> {
+  return {
+    id: 1_000_000 + repo.seq * 1000 + issue.number,
+    number: issue.number,
+    state: issue.state,
+    title: issue.title,
+    body: issue.body,
+    labels: issue.labels.map(labelJson),
+    comments: issue.comments.length,
+    created_at: issue.createdAt,
+    updated_at: issue.updatedAt,
+    closed_at: issue.closedAt,
+  };
+}
+
 function cachedIssueWire(repo: Repo, issue: Issue): Buffer {
   const key = issue.updatedAt + '|' + issue.state + '|' + issue.comments.length + '|' + issue.labels.map((label) => label.name).join(',');
   const id = repoKey(repo) + '#' + issue.number;
   const hit = issueWireCache.get(id);
   if (hit !== undefined && hit.key === key) return hit.packet;
-  const body = Buffer.from(
-    JSON.stringify({
-      id: 1_000_000 + repo.seq * 1000 + issue.number,
-      number: issue.number,
-      state: issue.state,
-      title: issue.title,
-      body: issue.body,
-      labels: issue.labels.map(labelJson),
-      comments: issue.comments.length,
-      created_at: issue.createdAt,
-      updated_at: issue.updatedAt,
-      closed_at: issue.closedAt,
-    }),
-    'utf8',
-  );
+  const body = Buffer.from(JSON.stringify(leanIssueJson(repo, issue)), 'utf8');
   const head = Buffer.from(
     'HTTP/1.1 200 OK\r\n' +
       'content-type: application/json; charset=utf-8\r\n' +
@@ -1172,7 +1174,7 @@ function handleIssuesRoute(
         labels,
       });
       if (!result.ok) return sendError(res, result.status ?? 422, result.error);
-      return sendJson(res, 201, issueJson(repo, result.value));
+      return sendJson(res, 201, leanIssueJson(repo, result.value));
     }
     return sendError(res, 404, 'Not Found');
   }

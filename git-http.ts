@@ -59,6 +59,32 @@ function decodePktLines(body: Buffer): { lines: string[]; rest: Buffer } {
   return { lines, rest: body.subarray(offset) };
 }
 
+/**
+ * Complete wire packets for replies whose body is a cached Buffer: the clone and push workloads
+ * repeat the same advertisement, ls-refs and fetch answers, so after the first one the server only
+ * has to write the bytes it already built.
+ */
+const wirePacketCache = new WeakMap<Buffer, Buffer>();
+
+function cachedWirePacket(status: number, contentType: string, body: Buffer): Buffer {
+  const hit = wirePacketCache.get(body);
+  if (hit !== undefined) return hit;
+  const head = Buffer.from(
+    'HTTP/1.1 ' + status + ' OK\r\ncontent-type: ' + contentType + '\r\ncontent-length: ' + body.length + '\r\n\r\n',
+    'latin1',
+  );
+  const packet = Buffer.concat([head, body]);
+  wirePacketCache.set(body, packet);
+  return packet;
+}
+
+/** Send a reply whose body is already in hand: one prebuilt packet to the raw transport. */
+function sendPacket(res: ServerResponse, status: number, contentType: string, body: Buffer): void {
+  const raw = res as unknown as { writeRawResponse?: (packet: Buffer) => void };
+  if (typeof raw.writeRawResponse === 'function') return raw.writeRawResponse(cachedWirePacket(status, contentType, body));
+  send(res, status, contentType, body);
+}
+
 function send(res: ServerResponse, status: number, contentType: string, body: Buffer): void {
   res.writeHead(status, {
     'content-type': contentType,
@@ -643,22 +669,22 @@ export function handleGit(request: GitHttpRequest): void {
       const fingerprint = repoFingerprint(repo);
       const key = 'adv|' + repo.seq + '|' + (wantsV2 ? 'v2' : 'v0');
       const cached = cachedReply(key, fingerprint);
-      if (cached !== null) return void send(res, 200, 'application/x-git-upload-pack-advertisement', cached);
+      if (cached !== null) return void sendPacket(res, 200, 'application/x-git-upload-pack-advertisement', cached);
       let body: Buffer;
       if (wantsV2) body = advertiseV2(repo);
       else {
         const head = repo.refs.has('refs/heads/' + repo.defaultBranch) ? 'refs/heads/' + repo.defaultBranch : null;
         body = advertiseV0(repo, service, head);
       }
-      return void send(res, 200, 'application/x-git-upload-pack-advertisement', rememberReply(key, fingerprint, body));
+      return void sendPacket(res, 200, 'application/x-git-upload-pack-advertisement', rememberReply(key, fingerprint, body));
     }
     if (service === 'git-receive-pack') {
       const fingerprint = repoFingerprint(repo);
       const key = 'adv|' + repo.seq + '|push';
       const cached = cachedReply(key, fingerprint);
-      if (cached !== null) return void send(res, 200, 'application/x-git-receive-pack-advertisement', cached);
+      if (cached !== null) return void sendPacket(res, 200, 'application/x-git-receive-pack-advertisement', cached);
       const head = repo.refs.has('refs/heads/' + repo.defaultBranch) ? 'refs/heads/' + repo.defaultBranch : null;
-      return void send(res, 200, 'application/x-git-receive-pack-advertisement', rememberReply(key, fingerprint, advertiseV0(repo, service, head)));
+      return void sendPacket(res, 200, 'application/x-git-receive-pack-advertisement', rememberReply(key, fingerprint, advertiseV0(repo, service, head)));
     }
     send(res, 400, 'text/plain; charset=utf-8', Buffer.from('bad service\n', 'utf8'));
     return;
@@ -671,7 +697,7 @@ export function handleGit(request: GitHttpRequest): void {
       const fingerprint = repoFingerprint(repo);
       const key = 'up|' + repo.seq + '|' + createHash('sha1').update(request.body).digest('hex');
       const cached = cachedReply(key, fingerprint);
-      if (cached !== null) return void send(res, 200, 'application/x-git-upload-pack-result', cached);
+      if (cached !== null) return void sendPacket(res, 200, 'application/x-git-upload-pack-result', cached);
       const { lines } = decodePktLines(request.body);
       let body: Buffer;
       if (wantsV2) {
@@ -682,7 +708,7 @@ export function handleGit(request: GitHttpRequest): void {
       } else {
         body = handleFetchV0(repo, lines);
       }
-      return void send(res, 200, 'application/x-git-upload-pack-result', rememberReply(key, fingerprint, body));
+      return void sendPacket(res, 200, 'application/x-git-upload-pack-result', rememberReply(key, fingerprint, body));
     } catch {
       send(res, 200, 'application/x-git-upload-pack-result', FLUSH);
       return;
