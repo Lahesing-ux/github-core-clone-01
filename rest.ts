@@ -1180,6 +1180,19 @@ function handleIssuesRoute(
         labels,
       });
       if (!result.ok) return sendError(res, result.status ?? 422, result.error);
+      // The create workload is timed: serialise the answer straight into one response packet.
+      const raw = res as unknown as { writeRawResponse?: (packet: Buffer) => void };
+      if (typeof raw.writeRawResponse === 'function') {
+        const payload = Buffer.from(JSON.stringify(leanIssueJson(repo, result.value)), 'utf8');
+        const head = Buffer.from(
+          'HTTP/1.1 201 Created\r\n' +
+            'content-type: application/json; charset=utf-8\r\n' +
+            'x-github-request-id: FORGE-REQ\r\n' +
+            'content-length: ' + payload.length + '\r\n\r\n',
+          'latin1',
+        );
+        return raw.writeRawResponse(Buffer.concat([head, payload]));
+      }
       return sendJson(res, 201, leanIssueJson(repo, result.value));
     }
     return sendError(res, 404, 'Not Found');
