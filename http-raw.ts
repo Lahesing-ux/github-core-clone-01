@@ -312,6 +312,44 @@ interface ParsedHead {
  * one request then one response, so this avoids the intermediate `text.split('\r\n')` arrays a
  * string-based parser allocates for every request.
  */
+/** Case-insensitive compare of a header name in the buffer against a lowercase literal. */
+function headerEquals(buffer: Buffer, start: number, end: number, text: string): boolean {
+  if (end - start !== text.length) return false;
+  for (let index = 0; index < text.length; index += 1) {
+    let code = buffer[start + index]!;
+    if (code >= 65 && code <= 90) code += 32;
+    if (code !== text.charCodeAt(index)) return false;
+  }
+  return true;
+}
+
+/**
+ * The only request headers the forge reads, as one small dispatch: everything else a client sends
+ * (accept, user-agent, accept-encoding, …) is skipped without allocating a name or a value.
+ */
+function headerCode(buffer: Buffer, start: number, end: number): number {
+  switch (end - start) {
+    case 4:
+      return headerEquals(buffer, start, end, 'host') ? 5 : 0;
+    case 6:
+      return headerEquals(buffer, start, end, 'expect') ? 3 : 0;
+    case 10:
+      return headerEquals(buffer, start, end, 'connection') ? 4 : 0;
+    case 12:
+      if (headerEquals(buffer, start, end, 'git-protocol')) return 7;
+      if (headerEquals(buffer, start, end, 'content-type')) return 8;
+      return 0;
+    case 13:
+      return headerEquals(buffer, start, end, 'authorization') ? 6 : 0;
+    case 14:
+      return headerEquals(buffer, start, end, 'content-length') ? 1 : 0;
+    case 17:
+      return headerEquals(buffer, start, end, 'transfer-encoding') ? 2 : 0;
+    default:
+      return 0;
+  }
+}
+
 function parseHead(buffer: Buffer, headerEnd: number): ParsedHead | string {
   // Request line: METHOD SP request-target SP HTTP-version CRLF.
   let firstSpace = -1;
@@ -357,13 +395,17 @@ function parseHead(buffer: Buffer, headerEnd: number): ParsedHead | string {
     let colon = lineStart;
     while (colon < lineStop && buffer[colon] !== 58) colon += 1;
     if (colon === lineStart || colon === lineStop) return 'malformed header';
-    const name = buffer.toString('latin1', lineStart, colon).toLowerCase();
+    const code = headerCode(buffer, lineStart, colon);
+    if (code === 0) {
+      lineStart = lineStop + 2;
+      continue;
+    }
     let valueStart = colon + 1;
     while (valueStart < lineStop && (buffer[valueStart] === 32 || buffer[valueStart] === 9)) valueStart += 1;
     let valueEnd = lineStop;
     while (valueEnd > valueStart && (buffer[valueEnd - 1] === 32 || buffer[valueEnd - 1] === 9)) valueEnd -= 1;
 
-    if (name === 'content-length') {
+    if (code === 1) {
       if (valueStart === valueEnd) return 'malformed content-length';
       let parsed = 0;
       for (let i = valueStart; i < valueEnd; i += 1) {
@@ -375,17 +417,20 @@ function parseHead(buffer: Buffer, headerEnd: number): ParsedHead | string {
       if (sawContentLength && parsed !== contentLength) return 'conflicting content-length';
       contentLength = parsed;
       sawContentLength = true;
-    } else if (name === 'transfer-encoding') {
+    } else if (code === 2) {
       transferEncoding = true;
-    } else if (name === 'expect') {
+    } else if (code === 3) {
       if (/100-continue/i.test(buffer.toString('latin1', valueStart, valueEnd))) expectContinue = true;
     }
 
-    const value = buffer.toString('latin1', valueStart, valueEnd);
-    const previous = headers[name];
-    if (previous === undefined) headers[name] = value;
-    else if (Array.isArray(previous)) previous.push(value);
-    else headers[name] = [previous, value];
+    if (code === 4 || code === 5 || code === 6 || code === 7 || code === 8) {
+      const name = code === 4 ? 'connection' : code === 5 ? 'host' : code === 6 ? 'authorization' : code === 7 ? 'git-protocol' : 'content-type';
+      const value = buffer.toString('latin1', valueStart, valueEnd);
+      const previous = headers[name];
+      if (previous === undefined) headers[name] = value;
+      else if (Array.isArray(previous)) previous.push(value);
+      else headers[name] = [previous, value];
+    }
     lineStart = lineStop + 2;
   }
 
