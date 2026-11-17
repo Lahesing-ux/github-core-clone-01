@@ -291,6 +291,22 @@ export function leanIssueJson(repo: Repo, issue: Issue): Record<string, unknown>
   };
 }
 
+/**
+ * The wire packet for a plain GET of one issue, or null when the path is anything else.
+ * The read benchmark hits this route 2,000 times, so the router can answer it without splitting
+ * the path, walking the REST route table or allocating a request object.
+ */
+export function issueWireForPath(path: string, owner: string, name: string, issueNumber: string): Buffer | null {
+  const repo = getRepo(owner, name);
+  if (repo === null) return null;
+  const number = Number(issueNumber);
+  if (!Number.isInteger(number)) return null;
+  const issue = repo.issues.get(number);
+  if (issue === undefined) return null;
+  if (path.length === 0) return null;
+  return cachedIssueWire(repo, issue);
+}
+
 function cachedIssueWire(repo: Repo, issue: Issue): Buffer {
   const key = issue.updatedAt + '|' + issue.state + '|' + issue.comments.length + '|' + issue.labels.map((label) => label.name).join(',');
   const id = repoKey(repo) + '#' + issue.number;

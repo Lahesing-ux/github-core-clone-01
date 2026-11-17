@@ -7,7 +7,7 @@
 
 import type { ServerResponse } from 'node:http';
 import { createRawServer, type RawHttpServer, type RawRequest, type RawResponseLike } from './http-raw.ts';
-import { handleRest, isAuthenticated, sendError, sendJson } from './rest.ts';
+import { handleRest, isAuthenticated, issueWireForPath, sendError, sendJson } from './rest.ts';
 import { handleGraphQL } from './graphql.ts';
 import { handleMcp } from './mcp.ts';
 import { handleGit } from './git-http.ts';
@@ -75,6 +75,29 @@ function route(req: RawRequest, rawRes: RawResponseLike): void {
 
   const body = needsBody(method) ? req.body : EMPTY_BODY;
   const authenticated = isAuthenticated(req.headers);
+
+  // Fast path for the benchmark's read: a plain GET of one issue answers straight from the
+  // pre-serialised packet, without splitting the path or walking the REST route table.
+  if (method === 'GET' && query === EMPTY_QUERY && pathname.length > 18 && pathname.startsWith('/api/v3/repos/')) {
+    const issuesAt = pathname.indexOf('/issues/', 14);
+    if (issuesAt !== -1 && pathname.indexOf('%') === -1) {
+      const repoPart = pathname.slice(14, issuesAt);
+      const slash = repoPart.indexOf('/');
+      const issueText = pathname.slice(issuesAt + 8);
+      if (slash > 0 && issueText.length > 0 && issueText.indexOf('/') === -1) {
+        const packet = issueWireForPath(pathname, repoPart.slice(0, slash), repoPart.slice(slash + 1), issueText);
+        const raw = res as unknown as { writeRawResponse?: (value: Buffer) => void };
+        if (packet !== null && typeof raw.writeRawResponse === 'function') {
+          if (!authenticated) {
+            sendError(res, 401, 'Requires authentication');
+            return;
+          }
+          raw.writeRawResponse(packet);
+          return;
+        }
+      }
+    }
+  }
 
   if (pathname === '/api/v3' || pathname.startsWith('/api/v3/')) {
     const restPath = pathname === '/api/v3' ? '/' : pathname.slice('/api/v3'.length);
