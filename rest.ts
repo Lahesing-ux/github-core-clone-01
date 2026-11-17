@@ -605,10 +605,16 @@ function decodeSegment(segment: string): string {
 }
 
 function pathSegments(path: string): string[] {
-  return path
-    .split('/')
-    .filter((segment) => segment !== '')
-    .map(decodeSegment);
+  // One pass, no intermediate arrays, and no percent-decoding for the segments that need none:
+  // this runs on every REST request, and the benchmark makes thousands of them.
+  const raw = path.split('/');
+  const out: string[] = [];
+  for (let index = 0; index < raw.length; index += 1) {
+    const segment = raw[index]!;
+    if (segment === '') continue;
+    out.push(segment.indexOf('%') === -1 ? segment : decodeSegment(segment));
+  }
+  return out;
 }
 
 function parseBody(request: ApiRequest): Record<string, unknown> | null {
