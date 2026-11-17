@@ -483,7 +483,7 @@ export function handleRest(request: ApiRequest, res: ServerResponse): void {
       }
       const repo = createRepo(VIEWER.login, name, bool(parsed.value.private), str(parsed.value.description));
       if (repo === null) {
-        sendError(res, 422, 'Repository creation failed.');
+        sendError(res, 422, 'Repository creation failed. Name already exists on this account.');
         return;
       }
       sendJson(res, 201, repoJson(repo));
