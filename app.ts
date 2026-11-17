@@ -1,46 +1,19 @@
 // The forge's HTTP entry point: one server that routes REST v3, GraphQL v4, MCP and git smart HTTP
 // to their handlers, and answers a JSON 404 for everything else.
+//
+// The transport is http-raw.ts: a small HTTP/1.1 parser/serialiser over node:net. The route table,
+// the body rules and every handler call are the same as the node:http version (kept next to this
+// file as app-node-http.ts for reference).
 
-import { createServer } from 'node:http';
-import type { IncomingMessage, Server, ServerResponse } from 'node:http';
+import type { ServerResponse } from 'node:http';
+import { createRawServer, type RawHttpServer, type RawRequest, type RawResponseLike } from './http-raw.ts';
 import { handleRest, isAuthenticated, sendError, sendJson } from './rest.ts';
 import { handleGraphQL } from './graphql.ts';
 import { handleMcp } from './mcp.ts';
 import { handleGit } from './git-http.ts';
 
-/** A request body larger than this is refused rather than buffered without bound. */
-const MAX_BODY_BYTES = 128 * 1024 * 1024;
-
-function readBody(req: IncomingMessage): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    let settled = false;
-    const fail = (error: Error): void => {
-      if (settled) return;
-      settled = true;
-      req.destroy();
-      reject(error);
-    };
-    req.on('data', (chunk: Buffer | string) => {
-      if (settled) return;
-      const buffer = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
-      size += buffer.length;
-      if (size > MAX_BODY_BYTES) {
-        fail(new Error('request body too large'));
-        return;
-      }
-      chunks.push(buffer);
-    });
-    req.on('end', () => {
-      if (settled) return;
-      settled = true;
-      resolve(Buffer.concat(chunks));
-    });
-    req.on('error', (error) => fail(error));
-    req.on('aborted', () => fail(new Error('request aborted')));
-  });
-}
+const EMPTY_QUERY = new URLSearchParams();
+const EMPTY_BODY = Buffer.alloc(0);
 
 function decodePathSegment(value: string | undefined): string {
   if (value === undefined) return '';
@@ -55,24 +28,52 @@ function needsBody(method: string): boolean {
   return method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
 }
 
-async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
+function route(req: RawRequest, rawRes: RawResponseLike): void {
+  // The handlers are written against node:http's response shape; the raw adapter implements the
+  // methods and properties they use (writeHead, setHeader/getHeader, headersSent, write, end,
+  // destroy).
+  const res = rawRes as unknown as ServerResponse;
   const method = (req.method ?? 'GET').toUpperCase();
   const host = req.headers.host ?? '127.0.0.1';
-  let url: URL;
-  try {
-    url = new URL(req.url ?? '/', 'http://' + host);
-  } catch {
-    sendError(res, 400, 'Bad Request');
-    return;
+
+  // The transport hands over the origin-form target the clients actually send. Splitting it here
+  // avoids constructing a URL object on every request; anything unusual (an absolute-form target)
+  // still goes through the URL parser so the route table sees exactly what it used to.
+  const rawUrl = req.url ?? '/';
+  let pathname: string;
+  let query: URLSearchParams;
+  let origin: string;
+  if (rawUrl.charCodeAt(0) === 47) {
+    const hash = rawUrl.indexOf('#');
+    const limit = hash === -1 ? rawUrl.length : hash;
+    const question = rawUrl.indexOf('?');
+    if (question !== -1 && question < limit) {
+      pathname = rawUrl.slice(0, question);
+      query = new URLSearchParams(rawUrl.slice(question + 1, limit));
+    } else {
+      pathname = rawUrl.slice(0, limit);
+      query = EMPTY_QUERY;
+    }
+    origin = 'http://' + host;
+  } else {
+    let url: URL;
+    try {
+      url = new URL(rawUrl, 'http://' + host);
+    } catch {
+      sendError(res, 400, 'Bad Request');
+      return;
+    }
+    pathname = url.pathname;
+    query = url.searchParams;
+    origin = url.origin;
   }
-  const pathname = url.pathname;
 
   if (method === 'GET' && pathname === '/healthz') {
     sendJson(res, 200, { ok: true });
     return;
   }
 
-  const body = needsBody(method) ? await readBody(req) : Buffer.alloc(0);
+  const body = needsBody(method) ? req.body : EMPTY_BODY;
   const authenticated = isAuthenticated(req.headers);
 
   if (pathname === '/api/v3' || pathname.startsWith('/api/v3/')) {
@@ -81,10 +82,10 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       {
         method,
         path: restPath,
-        query: url.searchParams,
+        query,
         headers: req.headers,
         body,
-        origin: url.origin,
+        origin,
         authenticated,
       },
       res,
@@ -93,7 +94,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   }
 
   if (pathname === '/api/graphql') {
-    handleGraphQL({ method, body, headers: req.headers, query: url.searchParams, res, authenticated });
+    handleGraphQL({ method, body, headers: req.headers, query, res, authenticated });
     return;
   }
 
@@ -114,7 +115,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       repo,
       rest,
       method,
-      query: url.searchParams,
+      query,
       headers: req.headers,
       body,
       res,
@@ -126,19 +127,21 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   sendError(res, 404, 'Not Found');
 }
 
-export function createApp(): Server {
-  return createServer((req, res) => {
-    void route(req, res).catch((error: unknown) => {
+export function createApp(): RawHttpServer {
+  return createRawServer((req, res) => {
+    try {
+      route(req, res);
+    } catch (error: unknown) {
       if (res.headersSent) {
         res.destroy();
         return;
       }
       const message = error instanceof Error ? error.message : 'Internal Server Error';
       try {
-        sendError(res, 500, message === '' ? 'Internal Server Error' : 'Internal Server Error');
+        sendError(res as unknown as ServerResponse, 500, message === '' ? 'Internal Server Error' : 'Internal Server Error');
       } catch {
         res.destroy();
       }
-    });
+    }
   });
 }

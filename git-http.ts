@@ -653,8 +653,12 @@ export function handleGit(request: GitHttpRequest): void {
       return void send(res, 200, 'application/x-git-upload-pack-advertisement', rememberReply(key, fingerprint, body));
     }
     if (service === 'git-receive-pack') {
+      const fingerprint = repoFingerprint(repo);
+      const key = 'adv|' + repo.seq + '|push';
+      const cached = cachedReply(key, fingerprint);
+      if (cached !== null) return void send(res, 200, 'application/x-git-receive-pack-advertisement', cached);
       const head = repo.refs.has('refs/heads/' + repo.defaultBranch) ? 'refs/heads/' + repo.defaultBranch : null;
-      return void send(res, 200, 'application/x-git-receive-pack-advertisement', advertiseV0(repo, service, head));
+      return void send(res, 200, 'application/x-git-receive-pack-advertisement', rememberReply(key, fingerprint, advertiseV0(repo, service, head)));
     }
     send(res, 400, 'text/plain; charset=utf-8', Buffer.from('bad service\n', 'utf8'));
     return;
