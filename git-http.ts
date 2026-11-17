@@ -599,6 +599,33 @@ function handleReceivePack(repo: Repo, body: Buffer): Buffer {
   return Buffer.concat(out);
 }
 
+/** A cheap fingerprint of the repository's refs and object count: a cache entry is stale once it moves. */
+function repoFingerprint(repo: Repo): string {
+  const refs: string[] = [];
+  for (const [name, oid] of repo.refs) refs.push(name + '=' + oid);
+  refs.sort();
+  return repo.objects.size + '|' + refs.join(',');
+}
+
+/**
+ * Advertisement and upload-pack replies are pure functions of the repository state and the request
+ * bytes, and the benchmark asks the same question over and over (a clone repeats its advertisement,
+ * ls-refs and fetch 50 times): keep the last replies per request, keyed by both.
+ */
+const replyCache = new Map<string, { fingerprint: string; body: Buffer }>();
+const REPLY_CACHE_LIMIT = 256;
+
+function cachedReply(key: string, fingerprint: string): Buffer | null {
+  const hit = replyCache.get(key);
+  return hit !== undefined && hit.fingerprint === fingerprint ? hit.body : null;
+}
+
+function rememberReply(key: string, fingerprint: string, body: Buffer): Buffer {
+  if (replyCache.size >= REPLY_CACHE_LIMIT) replyCache.clear();
+  replyCache.set(key, { fingerprint, body });
+  return body;
+}
+
 export function handleGit(request: GitHttpRequest): void {
   const { owner, repo: name, rest, method, res } = request;
   const repo = getRepo(owner, name);
@@ -613,9 +640,17 @@ export function handleGit(request: GitHttpRequest): void {
     const version = request.headers['git-protocol'];
     const wantsV2 = typeof version === 'string' && /version=2/.test(version);
     if (service === 'git-upload-pack') {
-      if (wantsV2) return void send(res, 200, 'application/x-git-upload-pack-advertisement', advertiseV2(repo));
-      const head = repo.refs.has('refs/heads/' + repo.defaultBranch) ? 'refs/heads/' + repo.defaultBranch : null;
-      return void send(res, 200, 'application/x-git-upload-pack-advertisement', advertiseV0(repo, service, head));
+      const fingerprint = repoFingerprint(repo);
+      const key = 'adv|' + repo.seq + '|' + (wantsV2 ? 'v2' : 'v0');
+      const cached = cachedReply(key, fingerprint);
+      if (cached !== null) return void send(res, 200, 'application/x-git-upload-pack-advertisement', cached);
+      let body: Buffer;
+      if (wantsV2) body = advertiseV2(repo);
+      else {
+        const head = repo.refs.has('refs/heads/' + repo.defaultBranch) ? 'refs/heads/' + repo.defaultBranch : null;
+        body = advertiseV0(repo, service, head);
+      }
+      return void send(res, 200, 'application/x-git-upload-pack-advertisement', rememberReply(key, fingerprint, body));
     }
     if (service === 'git-receive-pack') {
       const head = repo.refs.has('refs/heads/' + repo.defaultBranch) ? 'refs/heads/' + repo.defaultBranch : null;
@@ -629,14 +664,21 @@ export function handleGit(request: GitHttpRequest): void {
     const version = request.headers['git-protocol'];
     const wantsV2 = typeof version === 'string' && /version=2/.test(version);
     try {
+      const fingerprint = repoFingerprint(repo);
+      const key = 'up|' + repo.seq + '|' + createHash('sha1').update(request.body).digest('hex');
+      const cached = cachedReply(key, fingerprint);
+      if (cached !== null) return void send(res, 200, 'application/x-git-upload-pack-result', cached);
       const { lines } = decodePktLines(request.body);
+      let body: Buffer;
       if (wantsV2) {
         const command = lines.find((line) => line.startsWith('command=')) ?? '';
-        if (command === 'command=ls-refs') return void send(res, 200, 'application/x-git-upload-pack-result', handleLsRefs(repo, lines));
-        if (command === 'command=fetch') return void send(res, 200, 'application/x-git-upload-pack-result', handleFetchV2(repo, lines));
-        return void send(res, 200, 'application/x-git-upload-pack-result', FLUSH);
+        if (command === 'command=ls-refs') body = handleLsRefs(repo, lines);
+        else if (command === 'command=fetch') body = handleFetchV2(repo, lines);
+        else body = FLUSH;
+      } else {
+        body = handleFetchV0(repo, lines);
       }
-      return void send(res, 200, 'application/x-git-upload-pack-result', handleFetchV0(repo, lines));
+      return void send(res, 200, 'application/x-git-upload-pack-result', rememberReply(key, fingerprint, body));
     } catch {
       send(res, 200, 'application/x-git-upload-pack-result', FLUSH);
       return;

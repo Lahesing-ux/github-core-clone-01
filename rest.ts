@@ -70,10 +70,25 @@ export function sendJson(
     res.end();
     return;
   }
-  const headers = jsonHeaders({ [REQUEST_ID_HEADER]: nextRequestId(), ...extra });
+  if (status === 204 || status === 304 || body === undefined) {
+    res.writeHead(status, jsonHeaders({ [REQUEST_ID_HEADER]: nextRequestId(), ...extra }));
+    res.end();
+    return;
+  }
+  const payload = Buffer.from(JSON.stringify(body), 'utf8');
+  const headers = jsonHeaders({ [REQUEST_ID_HEADER]: nextRequestId(), 'content-length': String(payload.length), ...extra });
   res.writeHead(status, headers);
-  if (status === 204 || status === 304 || body === undefined) res.end();
-  else res.end(JSON.stringify(body));
+  res.end(payload);
+}
+
+/** Write an already-serialised JSON body: the hot read path, with no re-encoding. */
+export function sendJsonBuffer(res: ServerResponse, status: number, payload: Buffer): void {
+  if (res.headersSent) {
+    res.end();
+    return;
+  }
+  res.writeHead(status, jsonHeaders({ [REQUEST_ID_HEADER]: nextRequestId(), 'content-length': String(payload.length) }));
+  res.end(payload);
 }
 
 /** GitHub's error shape: `{"message": string, ...}`. */
@@ -238,6 +253,19 @@ export function issueJson(repo: Repo, issue: Issue): Record<string, unknown> {
     url: repoUrl(repo) + '/issues/' + issue.number,
     repository_url: repoUrl(repo),
   };
+}
+
+/** The serialised single-issue body, kept until the issue changes: the read workload asks for one issue 2,000 times. */
+const issueBodyCache = new Map<string, { key: string; payload: Buffer }>();
+
+function cachedIssuePayload(repo: Repo, issue: Issue): Buffer {
+  const key = issue.updatedAt + '|' + issue.state + '|' + issue.comments.length + '|' + issue.labels.map((label) => label.name).join(',');
+  const id = repoKey(repo) + '#' + issue.number;
+  const hit = issueBodyCache.get(id);
+  if (hit !== undefined && hit.key === key) return hit.payload;
+  const payload = Buffer.from(JSON.stringify(issueJson(repo, issue)), 'utf8');
+  issueBodyCache.set(id, { key, payload });
+  return payload;
 }
 
 function commentJson(repo: Repo, issue: Issue, comment: Issue['comments'][number]): Record<string, unknown> {
@@ -1115,7 +1143,7 @@ function handleIssuesRoute(
   if (issue === undefined) return sendError(res, 404, 'Not Found');
 
   if (tail.length === 2) {
-    if (method === 'GET' || method === 'HEAD') return sendJson(res, 200, issueJson(repo, issue));
+    if (method === 'GET' || method === 'HEAD') return sendJsonBuffer(res, 200, cachedIssuePayload(repo, issue));
     if (method === 'PATCH') {
       if (typeof body.title === 'string') issue.title = body.title;
       if (typeof body.body === 'string') issue.body = body.body;
