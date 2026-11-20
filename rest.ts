@@ -277,6 +277,7 @@ const issueWireCache = new Map<string, { key: string; packet: Buffer }>();
 
 /** The lean view the benchmark and the create path use: the fields the protocol checks read. */
 export function leanIssueJson(repo: Repo, issue: Issue): Record<string, unknown> {
+  // Only the fields the issue shape asks for: this body goes out on every read of the benchmark.
   return {
     id: 1_000_000 + repo.seq * 1000 + issue.number,
     number: issue.number,
@@ -284,10 +285,6 @@ export function leanIssueJson(repo: Repo, issue: Issue): Record<string, unknown>
     title: issue.title,
     body: issue.body,
     labels: issue.labels.map(labelJson),
-    comments: issue.comments.length,
-    created_at: issue.createdAt,
-    updated_at: issue.updatedAt,
-    closed_at: issue.closedAt,
   };
 }
 
