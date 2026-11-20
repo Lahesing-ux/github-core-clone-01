@@ -54,7 +54,12 @@ const HEADERS: Record<GitObjectType, string> = {
 
 export function hashObject(type: GitObjectType, data: Buffer): string {
   const header = Buffer.from(HEADERS[type] + ' ' + data.length + '\0', 'utf8');
-  return createHash('sha1').update(Buffer.concat([header, data])).digest('hex');
+  // Feed the header and the body to the digest separately: a push hashes three objects per
+  // request, and the copy a Buffer.concat would make is pure overhead here.
+  const digest = createHash('sha1');
+  digest.update(header);
+  digest.update(data);
+  return digest.digest('hex');
 }
 
 export function hashBlob(data: Buffer): string {

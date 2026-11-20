@@ -626,6 +626,11 @@ function handleReceivePack(repo: Repo, body: Buffer): Buffer {
 }
 
 /** A cheap fingerprint of the repository's refs and object count: a cache entry is stale once it moves. */
+/** One-shot SHA-1 of a request body for the reply cache (cheaper than a stream object). */
+function sha1Hex(data: Buffer): string {
+  return createHash('sha1').update(data).digest('hex');
+}
+
 function repoFingerprint(repo: Repo): string {
   const refs: string[] = [];
   for (const [name, oid] of repo.refs) refs.push(name + '=' + oid);
@@ -695,7 +700,7 @@ export function handleGit(request: GitHttpRequest): void {
     const wantsV2 = typeof version === 'string' && /version=2/.test(version);
     try {
       const fingerprint = repoFingerprint(repo);
-      const key = 'up|' + repo.seq + '|' + createHash('sha1').update(request.body).digest('hex');
+      const key = 'up|' + repo.seq + '|' + sha1Hex(request.body);
       const cached = cachedReply(key, fingerprint);
       if (cached !== null) return void sendPacket(res, 200, 'application/x-git-upload-pack-result', cached);
       const { lines } = decodePktLines(request.body);
